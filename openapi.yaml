@@ -1,0 +1,241 @@
+openapi: 3.1.0
+info:
+  title: ProspectFlow API
+  version: 0.1.0
+  description: Local starter API for permitted project and agenda coordination. Authenticated routes use a server-side session cookie.
+servers:
+  - url: http://127.0.0.1:8000
+security:
+  - sessionCookie: []
+paths:
+  /api/health:
+    get:
+      security: []
+      summary: Local scheduler and separate worker availability
+      responses: {'200': {description: Health and scheduler status}}
+  /api/auth/setup-status:
+    get:
+      security: []
+      summary: Check whether first-run owner setup is available
+      responses: {'200': {description: Setup state}}
+  /api/auth/setup:
+    post:
+      security: []
+      summary: Create the initial owner account and start a session
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [username, displayName, password], properties: {username: {type: string}, displayName: {type: string}, password: {type: string, minLength: 12}}}}}}
+      responses: {'201': {description: Account created; sets HttpOnly session cookie}, '400': {description: Setup validation error}, '409': {description: Setup already completed}}
+  /api/auth/login:
+    post:
+      security: []
+      summary: Verify credentials and create an expiring server-side session
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [username, password], properties: {username: {type: string}, password: {type: string}}}}}}
+      responses: {'200': {description: Signed in; sets HttpOnly session cookie}, '401': {description: Invalid credentials}, '429': {description: Too many attempts}}
+  /api/auth/me:
+    get:
+      summary: Read the signed-in account
+      responses: {'200': {description: Current user}, '401': {description: Missing or expired session}}
+  /api/auth/password:
+    post:
+      summary: Change password and revoke other sessions
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [currentPassword, newPassword], properties: {currentPassword: {type: string}, newPassword: {type: string, minLength: 12}}}}}}
+      responses: {'200': {description: Password updated and current session rotated}, '401': {description: Current password is incorrect}}
+  /api/auth/logout:
+    post:
+      security: []
+      summary: Revoke current session and clear its cookie
+      responses: {'200': {description: Signed out}}
+  /api/sources:
+    get:
+      summary: List approved sources
+      responses: {'200': {description: Source catalog}}
+    post:
+      summary: Add a permitted public HTTPS source or ANS Annuaire Santé FHIR connector
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SourceInput'}}}}
+      responses: {'201': {description: Source added}, '400': {description: Host, path, pacing, or policy validation failed}}
+  /api/sources/{sourceId}/policy-review:
+    post:
+      summary: Record a fresh terms and robots review attestation
+      parameters: [{in: path, name: sourceId, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PolicyReviewInput'}}}}
+      responses: {'200': {description: Policy dates refreshed}}
+  /api/projects:
+    get:
+      summary: List projects
+      parameters:
+        - {in: query, name: status, schema: {type: string}}
+        - {in: query, name: ownerId, schema: {type: string}}
+        - {in: query, name: q, schema: {type: string}}
+        - {in: query, name: limit, schema: {type: integer, maximum: 100}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0}}
+      responses: {'200': {description: Paginated projects}}
+    post:
+      summary: Create project
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectInput'}}}}
+      responses: {'201': {description: Created}, '400': {description: Validation error}}
+  /api/projects/{projectId}:
+    parameters: [{in: path, name: projectId, required: true, schema: {type: string}}]
+    get: {summary: Get project, responses: {'200': {description: Project}, '404': {description: Not found}}}
+    patch: {summary: Update project, requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectInput'}}}}, responses: {'200': {description: Updated project}}}
+  /api/projects/{projectId}/sources:
+    get: {summary: List linked sources, responses: {'200': {description: Project source configuration}}}
+  /api/projects/{projectId}/sources/{sourceId}:
+    put: {summary: Configure permitted project scope, requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectSourceInput'}}}}, responses: {'200': {description: Saved}, '400': {description: Scope rejected}}}
+    delete: {summary: Unlink source, responses: {'200': {description: Unlinked}}}
+  /api/projects/{projectId}/readiness:
+    get: {summary: Actionable run-readiness validation, responses: {'200': {description: Readiness and issues}}}
+  /api/projects/{projectId}/summary:
+    get: {summary: Bounded project summary counts, responses: {'200': {description: Summary}}}
+  /api/projects/{projectId}/prepare:
+    post:
+      summary: Normalize and quality-check up to 1,000 project records while preserving source provenance
+      parameters: [{in: path, name: projectId, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, properties: {limit: {type: integer, minimum: 1, maximum: 1000, default: 1000}}}}}}
+      responses: {'200': {description: Preparation counts}, '404': {description: Project not found}}
+  /api/projects/{projectId}/analysis:
+    get:
+      summary: Bounded project quality and categorical analysis
+      parameters: [{in: path, name: projectId, required: true, schema: {type: string}}]
+      responses: {'200': {description: Record counts, quality, review states and top specialties, roles and locations}}
+  /api/projects/{projectId}/report.csv:
+    get:
+      summary: Export a bounded CSV report of prepared records
+      parameters:
+        - {in: path, name: projectId, required: true, schema: {type: string}}
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 10000, default: 1000}}
+        - {in: query, name: includeDuplicates, schema: {type: boolean, default: false}}
+        - {in: query, name: status, schema: {type: string}}
+      responses: {'200': {description: UTF-8 CSV report}, '404': {description: Project not found}}
+  /api/projects/{projectId}/runs:
+    get:
+      summary: List project runs
+      parameters:
+        - {in: query, name: status, schema: {type: string}}
+        - {in: query, name: from, schema: {type: string, format: date-time}}
+        - {in: query, name: to, schema: {type: string, format: date-time}}
+        - {in: query, name: limit, schema: {type: integer, maximum: 100}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0}}
+      responses: {'200': {description: Paginated runs}}
+    post:
+      summary: Create an immediate or scheduled run and linked agenda event
+      parameters: [{in: header, name: Idempotency-Key, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunInput'}}}}
+      responses: {'201': {description: Run created}, '400': {description: Readiness or validation error}, '200': {description: Existing idempotent run}}
+  /api/projects/{projectId}/records:
+    get:
+      summary: Paginated project review queue with field provenance
+      parameters:
+        - {in: path, name: projectId, required: true, schema: {type: string}}
+        - {in: query, name: status, schema: {type: string, enum: [needs_review, verified, resolved, flagged]}}
+        - {in: query, name: q, schema: {type: string}}
+        - {in: query, name: limit, schema: {type: integer, maximum: 100}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0}}
+      responses: {'200': {description: Paginated review records}}
+  /api/projects/{projectId}/records.csv:
+    get:
+      summary: Export a bounded Excel-compatible CSV of filtered project records and provenance
+      parameters:
+        - {in: path, name: projectId, required: true, schema: {type: string}}
+        - {in: query, name: status, schema: {type: string, enum: [needs_review, verified, resolved, flagged]}}
+        - {in: query, name: q, schema: {type: string, maxLength: 200}}
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 10000, default: 10000}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0, default: 0}}
+      responses: {'200': {description: UTF-8 BOM CSV readable by Excel with source provenance}, '404': {description: Project not found}}
+  /api/projects/{projectId}/records/{recordId}/review:
+    post:
+      summary: Verify, resolve, or flag a record
+      parameters:
+        - {in: path, name: projectId, required: true, schema: {type: string}}
+        - {in: path, name: recordId, required: true, schema: {type: string}}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RecordReviewInput'}}}}
+      responses: {'200': {description: Review state updated}}
+  /api/agenda:
+    get:
+      summary: Filter agenda entries
+      parameters:
+        - {in: query, name: from, schema: {type: string, format: date-time}}
+        - {in: query, name: to, schema: {type: string, format: date-time}}
+        - {in: query, name: projectId, schema: {type: string}}
+        - {in: query, name: sourceId, schema: {type: string}}
+        - {in: query, name: ownerId, schema: {type: string}}
+        - {in: query, name: type, schema: {type: string}}
+        - {in: query, name: status, schema: {type: string}}
+        - {in: query, name: limit, schema: {type: integer, maximum: 500}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0}}
+      responses: {'200': {description: Agenda entries}}
+    post: {summary: Create agenda event, requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AgendaInput'}}}}, responses: {'201': {description: Created}}}
+  /api/agenda/{eventId}:
+    parameters: [{in: path, name: eventId, required: true, schema: {type: string}}]
+    get: {summary: Get agenda entry, responses: {'200': {description: Agenda event}}}
+    patch: {summary: Edit or reschedule agenda event and linked run, responses: {'200': {description: Updated}}}
+    delete: {summary: Delete event, description: A queued or scheduled linked run requires an explicit cancelLinkedRun confirmation. Active runs require a worker cancellation handshake., responses: {'200': {description: Deleted}, '409': {description: Confirmation required}}}
+  /api/scrape-jobs/{jobId}/cancel:
+    post: {summary: Cancel a queued run or request safe cancellation at the active worker checkpoint, responses: {'200': {description: Cancelled}, '202': {description: Active cancellation requested}}}
+  /api/scrape-jobs/{jobId}/retry:
+    post: {summary: Create an idempotent retry of a failed run, responses: {'201': {description: Retry queued with linked agenda event}, '400': {description: Retry not safe or project not ready}}}
+components:
+  securitySchemes:
+    sessionCookie: {type: apiKey, in: cookie, name: prospectflow_session}
+  schemas:
+    ProjectInput:
+      type: object
+      required: [name, ownerId]
+      properties:
+        name: {type: string, minLength: 1}
+        ownerId: {type: string}
+        purpose: {type: string}
+        priority: {type: string, enum: [low, normal, high]}
+        status: {type: string, enum: [planning, active, paused, completed]}
+        timezone: {type: string, description: IANA timezone}
+    ProjectSourceInput:
+      type: object
+      required: [allowedPaths, selectedFields, pacingSeconds]
+      properties:
+        allowedPaths: {type: array, items: {type: string}, description: For ANS FHIR use /fhir/v2/Practitioner and /fhir/v2/_page; add /fhir/v2/Organization only when practice contact fields are selected. The page endpoint is only for same-host opaque pagination.}
+        selectedFields: {type: array, items: {type: string, enum: [name, role, title, company, location, professional_url, industry, seniority, public_bio, professional_id, specialty, practice_address, practice_phone, practice_email]}, description: "Practice contacts are collected only from a linked organization object on a permitted public-html source; direct person or home contacts are excluded. ANS FHIR excludes secure messaging contacts."}
+        pacingSeconds: {type: integer, minimum: 1}
+        policyReviewDue: {type: string, format: date}
+        query: {type: object, additionalProperties: {type: string, maxLength: 4000}, description: ANS filters limited to name, identifier, qualification-code and active; qualification-code accepts comma-separated code tokens}
+    RunInput:
+      type: object
+      required: [sourceId, idempotencyKey]
+      properties:
+        sourceId: {type: string}
+        scheduledAt: {type: string, format: date-time, nullable: true}
+        idempotencyKey: {type: string}
+        search: {type: object, additionalProperties: {type: string, maxLength: 4000}, description: Bounded ANS filters; do not send credentials here}
+    AgendaInput:
+      type: object
+      required: [title, type, startAt, endAt, timezone]
+      properties:
+        title: {type: string}
+        type: {type: string, enum: [milestone, scrape_run, source_review, quality_review, team_task, follow_up]}
+        startAt: {type: string, format: date-time}
+        endAt: {type: string, format: date-time}
+        timezone: {type: string, description: IANA timezone}
+    SourceInput:
+      type: object
+      required: [policyReviewDue, termsReviewed]
+      properties:
+        adapter: {type: string, enum: [public-html, ans-fhir]}
+        name: {type: string, maxLength: 120}
+        baseUrl: {type: string, format: uri, description: Required for public-html; ANS uses the fixed official API endpoint}
+        termsUrl: {type: string, format: uri, description: Required for public-html}
+        allowedPaths: {type: array, minItems: 1, items: {type: string}, description: Required for public-html}
+        minIntervalSeconds: {type: integer, minimum: 60, maximum: 86400, description: Required for public-html}
+        policyReviewDue: {type: string, format: date}
+        termsReviewed: {type: boolean, const: true}
+        robotsReviewed: {type: boolean, const: true}
+    PolicyReviewInput:
+      type: object
+      required: [termsUrl, policyReviewDue, termsReviewed, robotsReviewed]
+      properties:
+        termsUrl: {type: string, format: uri}
+        policyReviewDue: {type: string, format: date}
+        termsReviewed: {type: boolean, const: true}
+        robotsReviewed: {type: boolean, const: true}
+    RecordReviewInput:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, enum: [resolved, verified, flagged]}
+        note: {type: string, maxLength: 2000}
